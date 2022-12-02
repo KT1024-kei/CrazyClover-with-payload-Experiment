@@ -1,102 +1,184 @@
-#-*- coding: utf-8 -*-
-"""
-tips 
+#!/user/bin/env python
+# coding: UTF-8
 
-自作モジュールを読み込みたい時はsettingsのところでpython.analysis.extraPathsにパスを登録する
-
-"""
 import sys
-sys.path.append('../')
 import numpy as np
+import datetime
+import time
+import termios
+from timeout_decorator import timeout, TimeoutError
+import pandas as pd
 import matplotlib.pyplot as plt
-import mpl_toolkits.mplot3d.axes3d as Axes3D
-from collections import deque
 
-from tools.Decorator import run_once
-from tools.Mathfunction import Mathfunction, Integration
-from tools.Log import Log_data
-from Drone.Drone_with_Load_model import Drone_with_cable_suspended as QCS
-from Controller.Controllers import Controllers
+import rospy
+import tf2_ros
+import tf_conversions
+import tf
+from crazyswarm.msg  import GenericLogData
 
-class Env_Experiment(Mathfunction):
+# 関連モジュールのインポート
+from .tools.Decorator import run_once
+from .frames_setup import Frames_setup
+from .tools.Mathfunction import LowPath_Filter, Mathfunction
+from .tools.Log import Log_data
+from .models import quadrotor_with_50cm_cable as model
+
+# 定値制御
+class Env_Experiment(Frames_setup):
+    # このクラスの初期設定を行う関数
     def __init__(self, Texp, Tsam, num):
+        # frames_setup, vel_controller の初期化
+        super(Frames_setup, self).__init__()
 
-        # Experiment Parametor
         self.Tend = Texp
-        self.dt = Tsam
-        self.num = num        
+        self.Tsam = Tsam
+
+
+        self.mathfunc = Mathfunction()
+        
+        # ! Initialization Lowpass Filter 
+        self.LowpassP = LowPath_Filter()
+        self.LowpassP.Init_LowPass2D(fc=5)
+        self.LowpassV = LowPath_Filter()
+        self.LowpassV.Init_LowPass2D(fc=5)
+        self.LowpassE = LowPath_Filter()
+        self.LowpassE.Init_LowPass2D(fc=5)
+
+        self.LowpassVl = LowPath_Filter()
+        self.LowpassVl.Init_Lowpass2D(fc=5)
+
+
+        self.set_frame()
+        self.set_key_input()
+        self.set_log_function()
+        self.init_state()
         
         self.log = Log_data(num)
-        self.model = QCS(self.dt)
-        self.l = self.model.l
-
-    def init_state(self, drone = 0, 
-                                P=np.array([0.0, 0.0, 1.0]),   
-                                V=np.array([0.0, 0.0, 0.0]), 
-                                R=np.array([[1.0, 0.0, 0.0],[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), 
-                                Euler=np.array([0.0, 0.0, 0.0]), 
-                                Wb=np.array([0.0, 0.0, 0.0]), 
-                                Euler_rate=np.array([0.0, 0.0, 0.0]),
-                                q = np.array([0.0, 0.0, -1.0]),
-                                dq = np.array([0.0, 0.0, 0.0])):
-
-        R = self.Euler2Rot(Euler)
-        print("set Initial state")
-        self.P          = P
-        self.V          = V
-        self.Euler      = Euler
-        self.R          = R
-        self.Wb         = Wb
-        self.Euler_rate = Euler_rate
-        self.L          = P + self.l*q
-        self.dL         = V + self.l*dq
-        self.q          = q
-        self.dq         = dq
-        self.M = drone.M
-
-        drone.set_initial_state(P, V, R, Euler, Wb, Euler_rate, self.L, self.dL, self.q, self.dq, self.dt)
-
-    def init_plot(self,ax = None):
-        if ax is None:
-            fig = plt.figure()
-            ax = Axes3D.Axes3D(fig)
-            ax.set_xlim((-2,2))
-            ax.set_ylim((-2,2))
-            ax.set_zlim((0,2))
-        ax.plot([], [], [], '-', c='red',zorder = 10)
-        ax.plot([], [], [], '-', c='blue',zorder = 10)
-        ax.plot([], [], [], '-', c='green', marker='o', markevery=2,zorder = 10)
-        ax.plot([], [], [], '-', c='red',zorder = 10)
-        ax.plot([], [], [], '-', c='green', marker='o', markevery=2,zorder = 10)
-        ax.plot([], [], [], '.', c='green', markersize=2,zorder = 10)
         
-        self.lines = ax.get_lines()[-6:]
-        self.pos_history = deque(maxlen=100)
+        time.sleep(0.5)
 
-    def update_plot(self,frame):
+    # * set frame of crazyflie and paylad
+    def set_frame(self):
+        self.world_frame = Frames_setup().world_frame
+        self.child_frame = Frames_setup().children_frame[0]
+        self.payload_frame = "payload"
+        self.tfBuffer = tf2_ros.Buffer()
+        listener = tf2_ros.TransformListener(self.tfBuffer)
+        time.sleep(0.5)
+
+    # * keybord input function
+    def set_key_input(self):
+    
+        self.fd = sys.stdin.fileno()
+
+        self.old = termios.tcgetattr(self.fd)
+        self.new = termios.tcgetattr(self.fd)
+
+        self.new[3] &= ~termios.ICANON
+        self.new[3] &= ~termios.ECHO
+
+    def set_log_function(self):
+
+        self.cmd_sub = rospy.Subscriber("/cf20/log1", GenericLogData, self.log_callback)
+
+    def init_state(self):
+        self.P = np.zeros(3)
+        self.Ppre = np.zeros(3)
+        self.Vrow = np.zeros(3)
+        self.Vfiltered = np.zeros(3)
+        self.R = np.zeros((3, 3))
+        self.Euler = np.zeros(3)
+
+        self.Pl = np.zeros(3)
+        self.Plpre = np.zeros(3)
+        self.Vl = np.zeros(3)
+
+        self.q = np.zeros(3)
+        self.qpre = np.zeros(3)
+        self.qd = np.zeros(3)
+
+        try:
+            quad = self.tfBuffer.lookup_transform(self.world_frame, self.child_frame, rospy.Time(0))
+            load = self.tfBuffer.lookup_transform(self.world_frame, self.payload_frame, rospy.Time(0))
+
+        # 取得できなかった場合は0.5秒間処理を停止し処理を再開する
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            rospy.logerr('LookupTransform Error !')
+            rospy.sleep(0.5)
+            exit()
+
+        self.P[0] = quad.transform.translation.x; self.P[1] = quad.transform.translation.y; self.P[2] = quad.transform.translation.z
+        self.Quaternion = (quad.transform.rotation.x,quad.transform.rotation.y,quad.transform.rotation.z,quad.transform.rotation.w)
+        self.Euler = tf_conversions.transformations.euler_from_quaternion(self.Quaternion)
+        self.Eulerpre = self.Euler
+        # self.R = tf_conversions.transformations.quaternion_matrix(self.Quaternion)[:3, :3]
+        self.R = self.mathfunc.Euler2Rot(self.Euler)
+
+        self.Pl[0] = load.transform.translation.x; self.Pl[1] = load.transform.translation.y; self.Pl[2] = load.transform.translation.z
         
-        lines_data = [frame[:,[0,2]], frame[:,[1,3]], frame[:,[4,5]], np.array([[self.P[0], self.L[0]],[self.P[1], self.L[1]],[self.P[2], self.L[2]]]), np.array([self.L[0], self.L[1], self.L[2]])]
-
-        for line, line_data in zip(self.lines[:5], lines_data):
-            x, y, z = line_data
-            line.set_data(x, y)
-            line.set_3d_properties(z)
-
-        self.pos_history.append(np.array([self.L[0], self.L[1], self.L[2]]))
-        history = np.array(self.pos_history)
-        self.lines[-1].set_data(history[:,0], history[:,1])
-        self.lines[-1].set_3d_properties(history[:,-1])
 
 # ------------------------------- ここまで　初期化関数 ---------------------
+
+    def update_state(self):
+        try:
+            quad = self.tfBuffer.lookup_transform(self.world_frame, self.child_frame, rospy.Time(0))
+            load = self.tfBuffer.lookup_transform(self.world_frame, self.payload_frame, rospy.Time(0))
+
+        # 取得できなかった場合は0.5秒間処理を停止し処理を再開する
+        except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
+            rospy.logerr('LookupTransform Error !')
+            rospy.sleep(0.5)
+            exit()
+
+        # ! state of quadrotor 
+        # position
+        self.P[0] = quad.transform.translation.x; self.P[1] = quad.transform.translation.y; self.P[2] = quad.transform.translation.z
+        self.P = self.LowpassP.LowPass2D(self.P, self.dt)
+        # velocity
+        self.Vrow = self.mathfunc.deriv(self.P, self.Ppre, self.dt)
+        self.Vfiltered = self.LowpassV.LowPass2D(self.Vrow, self.dt)
+        # attitude
+        self.Quaternion = (quad.transform.rotation.x,quad.transform.rotation.y,quad.transform.rotation.z,quad.transform.rotation.w)
+        self.Euler = self.LowpassE.LowPass2D(tf_conversions.transformations.euler_from_quaternion(self.Quaternion), self.dt)
+        self.Euler[0] = self.mathfunc.Remove_outlier(self.Euler[0], self.Eulerpre[0], 0.1)
+        self.Euler[1] = self.mathfunc.Remove_outlier(self.Euler[1], self.Eulerpre[1], 0.1)
+        self.Euler[2] = self.mathfunc.Remove_outlier(self.Euler[2], self.Eulerpre[2], 0.1)
+        # self.R = tf_conversions.transformations.quaternion_matrix(self.Quaternion)[:3, :3]
+        self.R = self.mathfunc.Euler2Rot(self.Euler)
+        # previous states update
+        self.Ppre[0] = self.P[0]; self.Ppre[1] = self.P[1]; self.Ppre[2] = self.P[2]
+        self.Eulerpre = self.Euler
+
+        # ! state of payload
+        # position and velocity
+        self.Pl[0] = load.transform.translation.x; self.Pl[1] = load.transform.translation.y; self.Pl[2] = load.transform.translation.z
+        self.Vlrow = self.mathfunc.deriv(self.Pl, self.Plpre, self.dt)
+        self.Vl_filterd = self.LowpassVl.LowPass2D(self.Vlrow, self.dt)
+
+        # vector and vector velocity
+        self.q = (self.Pl - self.P)/model.L
+        self.dqrow = self.mathfunc.deriv(self.q, self.qpre, self.dt)
+        self.dq_filterd = self.LowpassVl.LowPass2D(self.dqrow, self.dt)
+
+        # previous state update
+        self.Plpre = self.Pl
+        self.qpre = self.q
+
+    def set_dt(self, dt):
+        self.dt = dt
+
+    def log_callback(self, log):
+        self.M = log.values
+
     def set_reference(self, controller,  
-                            P=np.array([-1.0, 0.0, 0.0]),   
+                            P=np.array([0.0, 0.0, 0.0]),   
                             V=np.array([0.0, 0.0, 0.0]), 
                             R=np.array([[1.0, 0.0, 0.0],[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]), 
                             Euler=np.array([0.0, 0.0, 0.0]), 
                             Wb=np.array([0.0, 0.0, 0.0]), 
                             Euler_rate=np.array([0.0, 0.0, 0.0]),
                             traj="circle",
-                            controller_type="payload",
+                            controller_type="pid",
                             command = "hovering",
                             init_controller=True):
         if init_controller:
@@ -108,28 +190,12 @@ class Env_Experiment(Mathfunction):
                 controller.set_reference(P, V, R, Euler, Wb, Euler_rate, controller_type) 
             else:
                 controller.set_reference(P, V, R, Euler, Wb, Euler_rate, controller_type)
+        elif controller_type == "mellinger":
+            controller.set_reference(traj)
         elif controller_type == "payload":
             controller.set_reference(traj)
 
         
-    def set_dt(self, dt):
-        self.dt = dt
-        
-    def update_state(self, drone):
-        
-        self.P          =     drone.P.now
-        self.V          =     drone.V.now
-        self.Euler      =     drone.Euler.now
-        self.R          =     drone.R.now
-        self.Wb         =     drone.Wb.now
-        self.Euler_rate =     drone.Euler_rate.now
-        drone.Euler_rate.now[1] =  -drone.Euler_rate.now[1]
-        self.L = drone.L.now
-        self.dL = drone.dL.now
-        self.q = drone.q.now
-        self.dq = drone.dq.now
-        self.M = drone.M
-
     def take_log(self, t, ctrl):
         self.log.write_state(t, self.P, self.V, self.R, self.Euler, np.zeros(3), np.zeros(3), self.M, self.L, self.q, self.dq)
         ctrl.log(self.log, t)
@@ -137,7 +203,27 @@ class Env_Experiment(Mathfunction):
     def save_log(self):
       self.log.close_file()
 
+    def get_input(self, input_thrust):
+        flag = False
+        try:
+            input = self.input_with_timeout("key:")
+            if input == "w":
+                input_thrust += 0.1
+            elif input == 'x':
+                input_thrust -= 0.1
+            elif input == "c":
+                flag = True
+                input_thrust = 0.0
+            else:
+                input = "Noinput"
+        except TimeoutError:
+            input = "Noinput"
+
+        return input_thrust, flag
+
     def time_check(self, t, Tint, Tend):
+        if Tint < self.Tsam:
+            time.sleep(self.Tsam - Tint)
         if t > Tend:
             return True
         return False
@@ -148,10 +234,13 @@ class Env_Experiment(Mathfunction):
         self.set_reference(controller=controller, command="land", init_controller=True, P=self.land_P, controller_type="pid")
         
     @run_once
-    def hovering(self, controller, P=np.array([0.0, 0.0, 1.0]), controller_type="payload"):
+    def hovering(self, controller, P=np.array([0.0, 0.0, 1.0]), controller_type="mellinger"):
         self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
-        self.land_P = np.array([0.0, 0.0, 0.1])
-
+        self.land_P = np.array([0.0, 0.0, model.L+0.5])
+        
+    def rand_with_cmd(self, controller, P=np.array([0.0, 0.0, 0.5+model.L]), controller_type="pid"):
+        self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
+    
     def track_circle(self, controller, flag=False):
         self.set_reference(controller=controller, traj="circle", controller_type="payload", init_controller=flag)
     
