@@ -1,3 +1,4 @@
+from termios import B0
 import numpy as np
 
 class Mathfunction():
@@ -8,7 +9,8 @@ class Mathfunction():
       pows = t**np.arange(0,order-k,1)
       terms[k:] = coeffs*pows
       return terms
-  # --------------- Pysical math function ------------------
+      
+# --------------- Pysical math function ------------------
   def Vee(self, Vector):
     return np.array([[0, -Vector[2], Vector[1]], [Vector[2], 0, -Vector[0]], [-Vector[1], Vector[0], 0]])
 
@@ -37,6 +39,7 @@ class Mathfunction():
   
     return Euler_angle_rate
 
+  # Euler angular velocity to Body angular velocity
   def EAR2BAV(self, Euler, Euler_rate):
     r = Euler[0]
     p = Euler[1]
@@ -46,33 +49,78 @@ class Mathfunction():
     cosP = np.cos(p);sinP = np.sin(p)
 
     Wb = np.matmul((np.array([[1.0, 0.0, -sinP],
-                                        [0.0, cosR,  cosP * sinR],
-                                        [0.0, -sinR, cosP * cosR]])) , Euler_rate)
+                              [0.0, cosR,  cosP * sinR],
+                              [0.0, -sinR, cosP * cosR]])) , Euler_rate)
     
     return Wb
-  
+
   def Euler2Rot(self, Euler):
-    print(Euler)
     r = Euler[0]; p = Euler[1]; y = Euler[2]
     cosR = np.cos(r); sinR = np.sin(r)
     cosP = np.cos(p); sinP = np.sin(p)
     cosY = np.cos(y); sinY = np.sin(y)
 
-    R1 = np.matrix(([cosR,-sinR,0],
-                    [sinR,cosR,0],
-                    [0,0,1]))
+    R1 = np.matrix(([1.0, 0.0, 0.0],
+                    [0.0, cosR,-sinR],
+                    [0.0, sinR,cosR]))
     
-    R2 = np.matrix(([cosP,0,sinP],
-                    [0,1,0],
-                    [-sinP,0,cosP]))
+    R2 = np.matrix(([cosP,0.0,sinP],
+                    [0.0, 1.0 ,0.0],
+                    [-sinP,0.0,cosP]))
     
-    R3 = np.matrix(([cosY,-sinY,0],
-                    [sinY,cosY,0],
-                    [0,0,1]))
+    R3 = np.matrix(([cosY, -sinY,0.0],
+                    [sinY, cosY, 0.0],
+                    [0.0,  0.0,  1.0]))
     
     return np.array(R3*R2*R1)
 
-class RowPath_Filter():
+  def Remove_outlier(self, value_now, value_pre, variation_lim, Lower_lim=0.1, Upper_lim=0.1):
+    abs_variation = abs(value_now - value_pre)
+    if abs_variation > variation_lim:
+      print("variation occor")
+      return value_pre
+    else:
+      return value_now
+    #   if value_now > value_pre:
+    #     value_now = value_pre + Upper_lim
+    #   else:
+    #     value_now = value_pre - Lower_lim
+    
+    # return value_now
+  
+  ## https://www.earlevel.com/main/2003/03/02/the-bilinear-z-transform/
+  ## https://en.wikipedia.org/wiki/Digital_biquad_filter See transposed direct form
+  def Init_LowPass2D(self, fc, dt): # cut off frecency, sampling rate
+    
+    self.dt = dt
+    fr = 1.0/(fc * self.dt)     
+    omega = np.tan(np.pi/fr)
+
+    c = 1.0 + 2.0/np.sqrt(2)*omega + omega**2
+    self.b0 = omega**2/c
+    self.b1 = 2.0*self.b0
+    self.b2 = self.b0
+
+    self.a1 = 2*(omega**2 - 1)/c
+    self.a2 = (1.0 - 2.0/np.sqrt(2)*omega + omega**2)/c
+
+    self.r0 = np.zeros(3)
+    self.r1 = np.zeros(3)
+    self.r2 = np.zeros(3)
+
+  def LowPass2D(self, V0):
+    self.r0 = V0 - self.a1*self.r1 - self.a2*self.r2
+    self.Vout = self.b0*self.r0 + self.b1*self.r1 + self.b2*self.r2
+
+    self.r2 = self.r1
+    self.r1 = self.r0
+    
+  def deriv(self, now, pre,  dt):
+    return (now-pre)/dt
+
+## https://www.earlevel.com/main/2003/03/02/the-bilinear-z-transform/
+## https://en.wikipedia.org/wiki/Digital_biquad_filter See transposed direct form
+class LowPath_Filter():
   
   def Init_LowPass2D(self, fc): # cut off frecency, sampling rate
     
@@ -87,8 +135,8 @@ class RowPath_Filter():
 
     c = 1.0 + 2.0/np.sqrt(2)*omega + omega**2
     b0 = omega**2/c
-    b1 = 2.0*self.b0
-    b2 = self.b0
+    b1 = 2.0*b0
+    b2 = b0
 
     a1 = 2*(omega**2 - 1)/c
     a2 = (1.0 - 2.0/np.sqrt(2)*omega + omega**2)/c
@@ -100,7 +148,7 @@ class RowPath_Filter():
     self.r1 = self.r0
 
     return Vout
-    
+
 class Integration():
   
   def __init__(self, dt, param):
