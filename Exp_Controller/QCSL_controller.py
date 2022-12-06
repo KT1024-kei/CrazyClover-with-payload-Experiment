@@ -1,13 +1,12 @@
 import sys
-
+sys.path.append('../')
 
 import numpy as np
 from numpy import linalg as LA
-from Controller.Payload_Trajectory import Payload_Trajectory
+from .Payload_Trajectory import Payload_Trajectory
 from tools.Mathfunction import Mathfunction
-from Drone.Drone_with_Load_model import Drone_with_cable_suspended as DCS
 from tools.pid import PIDVEC
-
+import models.quadrotor_with_50cm_cable as model
 class Quad_with_Cable_Suspended(Mathfunction):
   def __init__(self, dt):
     self.dt = dt
@@ -22,11 +21,8 @@ class Quad_with_Cable_Suspended(Mathfunction):
     self.e3 = np.array([0.0, 0.0, 1.0])
     self.g = 9.81
     self.ge3 = self.g * self.e3
-    model = DCS(self.dt)
     self.mQ = model.mQ
-    self.mL = model.mL
-    self.I = model.I
-    self.l = model.l
+    self.mL = model.ml
 
     # init trajectory
     self.kp = np.array([0.7, 0.7, 4.0])*np.array([1, 1, 1])
