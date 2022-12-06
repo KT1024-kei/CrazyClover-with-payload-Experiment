@@ -17,11 +17,11 @@ import tf
 from crazyswarm.msg  import GenericLogData
 
 # 関連モジュールのインポート
-from .tools.Decorator import run_once
-from .frames_setup import Frames_setup
-from .tools.Mathfunction import LowPath_Filter, Mathfunction
-from .tools.Log import Log_data
-from .models import quadrotor_with_50cm_cable as model
+from tools.Decorator import run_once
+from frames_setup import Frames_setup
+from tools.Mathfunction import LowPath_Filter, Mathfunction
+from tools.Log import Log_data
+from models import quadrotor_with_50cm_cable as model
 
 # 定値制御
 class Env_Experiment(Frames_setup):
@@ -32,6 +32,7 @@ class Env_Experiment(Frames_setup):
 
         self.Tend = Texp
         self.Tsam = Tsam
+        self.t = 0
 
 
         self.mathfunc = Mathfunction()
@@ -45,7 +46,7 @@ class Env_Experiment(Frames_setup):
         self.LowpassE.Init_LowPass2D(fc=5)
 
         self.LowpassVl = LowPath_Filter()
-        self.LowpassVl.Init_Lowpass2D(fc=5)
+        self.LowpassVl.Init_LowPass2D(fc=5)
 
 
         self.set_frame()
@@ -61,7 +62,7 @@ class Env_Experiment(Frames_setup):
     def set_frame(self):
         self.world_frame = Frames_setup().world_frame
         self.child_frame = Frames_setup().children_frame[0]
-        self.payload_frame = "payload"
+        self.payload_frame = Frames_setup().children_frame[1]
         self.tfBuffer = tf2_ros.Buffer()
         listener = tf2_ros.TransformListener(self.tfBuffer)
         time.sleep(0.5)
@@ -92,10 +93,12 @@ class Env_Experiment(Frames_setup):
         self.Pl = np.zeros(3)
         self.Plpre = np.zeros(3)
         self.Vl = np.zeros(3)
+        self.Vl_filterd  = np.zeros(3)
 
         self.q = np.zeros(3)
         self.qpre = np.zeros(3)
-        self.qd = np.zeros(3)
+        self.dqrow = np.zeros(3)
+        self.dq_filtered = np.zeros(3)
 
         try:
             quad = self.tfBuffer.lookup_transform(self.world_frame, self.child_frame, rospy.Time(0))
@@ -120,6 +123,7 @@ class Env_Experiment(Frames_setup):
 # ------------------------------- ここまで　初期化関数 ---------------------
 
     def update_state(self):
+        flag = False
         try:
             quad = self.tfBuffer.lookup_transform(self.world_frame, self.child_frame, rospy.Time(0))
             load = self.tfBuffer.lookup_transform(self.world_frame, self.payload_frame, rospy.Time(0))
@@ -127,8 +131,8 @@ class Env_Experiment(Frames_setup):
         # 取得できなかった場合は0.5秒間処理を停止し処理を再開する
         except (tf2_ros.LookupException, tf2_ros.ConnectivityException, tf2_ros.ExtrapolationException):
             rospy.logerr('LookupTransform Error !')
-            rospy.sleep(0.5)
-            exit()
+            flag = True
+            
 
         # ! state of quadrotor 
         # position
@@ -140,10 +144,6 @@ class Env_Experiment(Frames_setup):
         # attitude
         self.Quaternion = (quad.transform.rotation.x,quad.transform.rotation.y,quad.transform.rotation.z,quad.transform.rotation.w)
         self.Euler = self.LowpassE.LowPass2D(tf_conversions.transformations.euler_from_quaternion(self.Quaternion), self.dt)
-        self.Euler[0] = self.mathfunc.Remove_outlier(self.Euler[0], self.Eulerpre[0], 0.1)
-        self.Euler[1] = self.mathfunc.Remove_outlier(self.Euler[1], self.Eulerpre[1], 0.1)
-        self.Euler[2] = self.mathfunc.Remove_outlier(self.Euler[2], self.Eulerpre[2], 0.1)
-        # self.R = tf_conversions.transformations.quaternion_matrix(self.Quaternion)[:3, :3]
         self.R = self.mathfunc.Euler2Rot(self.Euler)
         # previous states update
         self.Ppre[0] = self.P[0]; self.Ppre[1] = self.P[1]; self.Ppre[2] = self.P[2]
@@ -158,14 +158,19 @@ class Env_Experiment(Frames_setup):
         # vector and vector velocity
         self.q = (self.Pl - self.P)/model.L
         self.dqrow = self.mathfunc.deriv(self.q, self.qpre, self.dt)
-        self.dq_filterd = self.LowpassVl.LowPass2D(self.dqrow, self.dt)
+        self.dq_filtered = self.LowpassVl.LowPass2D(self.dqrow, self.dt)
 
         # previous state update
         self.Plpre = self.Pl
         self.qpre = self.q
 
+        return flag
+
     def set_dt(self, dt):
         self.dt = dt
+
+    def set_clock(self, t):
+        self.t = t
 
     def log_callback(self, log):
         self.M = log.values
@@ -180,7 +185,8 @@ class Env_Experiment(Frames_setup):
                             traj="circle",
                             controller_type="pid",
                             command = "hovering",
-                            init_controller=True):
+                            init_controller=True,
+                            tmp_P=np.zeros(3)):
         if init_controller:
             controller.select_controller()
         if controller_type == "pid":
@@ -191,14 +197,14 @@ class Env_Experiment(Frames_setup):
             else:
                 controller.set_reference(P, V, R, Euler, Wb, Euler_rate, controller_type)
         elif controller_type == "mellinger":
-            controller.set_reference(traj)
+            controller.set_reference(traj, self.t, tmp_P)
         elif controller_type == "payload":
             controller.set_reference(traj)
 
         
-    def take_log(self, t, ctrl):
-        self.log.write_state(t, self.P, self.V, self.R, self.Euler, np.zeros(3), np.zeros(3), self.M, self.L, self.q, self.dq)
-        ctrl.log(self.log, t)
+    def take_log(self, ctrl):
+        self.log.write_state(self.t, self.P, self.Vfiltered, self.R, self.Euler, np.zeros(3), np.zeros(3), self.M, self.Pl, self.Vl_filterd, self.q, self.dq_filtered)
+        ctrl.log(self.log, self.t)
         
     def save_log(self):
       self.log.close_file()
@@ -221,10 +227,10 @@ class Env_Experiment(Frames_setup):
 
         return input_thrust, flag
 
-    def time_check(self, t, Tint, Tend):
+    def time_check(self, Tint, Tend):
         if Tint < self.Tsam:
             time.sleep(self.Tsam - Tint)
-        if t > Tend:
+        if self.t > Tend:
             return True
         return False
 
@@ -237,7 +243,20 @@ class Env_Experiment(Frames_setup):
     def hovering(self, controller, P=np.array([0.0, 0.0, 1.0]), controller_type="mellinger"):
         self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
         self.land_P = np.array([0.0, 0.0, model.L+0.5])
-        
+
+    def takeoff(self, controller, Pinit=np.array([0.0, 0.0, 0.0])):
+        self.set_reference(controller=controller, traj="takeoff", controller_type="mellinger", tmp_P=Pinit)
+        self.land_P = np.array([0.0, 0.0, 0.1])
+
+    def land_track(self, controller):
+        self.set_reference(controller=controller, traj="land", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
+
+    def takeoff_50cm(self, controller, Pinit=np.array([0.0, 0.0, 0.0])):
+        self.set_reference(controller=controller, traj="takeoff_50cm", controller_type="mellinger", tmp_P=Pinit)
+        self.land_P = np.array([0.0, 0.0, 0.1])
+
+    def land_track_50cm(self, controller):
+        self.set_reference(controller=controller, traj="land_50cm", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
     def rand_with_cmd(self, controller, P=np.array([0.0, 0.0, 0.5+model.L]), controller_type="pid"):
         self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
     
@@ -248,7 +267,7 @@ class Env_Experiment(Frames_setup):
         self.set_reference(controller=controller, traj="straight", controller_type="payload", init_controller=flag)
 
     def stop_track(self, controller):
-        self.set_reference(controller=controller, traj="stop", controller_type="payload", init_controller=False)
+        self.set_reference(controller=controller, traj="stop", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], self.P[2]]))
         self.land_P[0:2] = self.P[0:2]
     
     def track_hover_payload(self, controller, flag=False):

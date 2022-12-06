@@ -146,7 +146,7 @@ class Quad_with_Cable_Suspended(Mathfunction):
 
   def log_nom(self, log, t):
 
-    log.write_nom(t=t, input_acc=self.input_acc, input_Wb=self.input_Wb, P=self.trajectory.traj_L, V=self.trajectory.traj_dL, Euler=self.Euler_nom, Wb=self.traj_W, Euler_rate=self.Euler_rate_nom, L=self.traj_L, q=self.traj_q, dq=self.traj_dq)
+    log.write_nom(t=t, input_acc=self.input_acc, input_Wb=self.input_Wb, P=self.trajectory.traj_L, V=self.trajectory.traj_dL, Euler=self.Euler_nom, Wb=self.traj_W, Euler_rate=self.Euler_rate_nom, L=self.traj_L,Vl=self.traj_dL, q=self.traj_q, dq=self.traj_dq)
 
     
 
