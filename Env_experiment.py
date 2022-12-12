@@ -44,9 +44,12 @@ class Env_Experiment(Frames_setup):
         self.LowpassV.Init_LowPass2D(fc=5)
         self.LowpassE = LowPath_Filter()
         self.LowpassE.Init_LowPass2D(fc=5)
-
+        self.LowpassL = LowPath_Filter()
+        self.LowpassL.Init_LowPass2D(fc=5)
         self.LowpassVl = LowPath_Filter()
         self.LowpassVl.Init_LowPass2D(fc=5)
+        self.Lowpassdq = LowPath_Filter()
+        self.Lowpassdq.Init_LowPass2D(fc=5)
 
 
         self.set_frame()
@@ -93,11 +96,14 @@ class Env_Experiment(Frames_setup):
         self.Pl = np.zeros(3)
         self.Plpre = np.zeros(3)
         self.Vl = np.zeros(3)
+        self.Vrow_pre = np.zeros(3)
         self.Vl_filterd  = np.zeros(3)
 
+        self.Height_drone = np.array([0.0, 0.0, 0.06])
         self.q = np.zeros(3)
         self.qpre = np.zeros(3)
         self.dqrow = np.zeros(3)
+        self.dqrowpre = np.zeros(3)
         self.dq_filtered = np.zeros(3)
 
         try:
@@ -137,13 +143,13 @@ class Env_Experiment(Frames_setup):
         # ! state of quadrotor 
         # position
         self.P[0] = quad.transform.translation.x; self.P[1] = quad.transform.translation.y; self.P[2] = quad.transform.translation.z
-        self.P = self.LowpassP.LowPass2D(self.P, self.dt)
+        self.P = self.LowpassP.LowPass2D(self.P, self.Tsam)
         # velocity
         self.Vrow = self.mathfunc.deriv(self.P, self.Ppre, self.dt)
-        self.Vfiltered = self.LowpassV.LowPass2D(self.Vrow, self.dt)
+        self.Vfiltered = self.LowpassV.LowPass2D(self.Vrow, self.Tsam)
         # attitude
         self.Quaternion = (quad.transform.rotation.x,quad.transform.rotation.y,quad.transform.rotation.z,quad.transform.rotation.w)
-        self.Euler = self.LowpassE.LowPass2D(tf_conversions.transformations.euler_from_quaternion(self.Quaternion), self.dt)
+        self.Euler = self.LowpassE.LowPass2D(tf_conversions.transformations.euler_from_quaternion(self.Quaternion), self.Tsam)
         self.R = self.mathfunc.Euler2Rot(self.Euler)
         # previous states update
         self.Ppre[0] = self.P[0]; self.Ppre[1] = self.P[1]; self.Ppre[2] = self.P[2]
@@ -152,17 +158,22 @@ class Env_Experiment(Frames_setup):
         # ! state of payload
         # position and velocity
         self.Pl[0] = load.transform.translation.x; self.Pl[1] = load.transform.translation.y; self.Pl[2] = load.transform.translation.z
+        self.Pl = self.LowpassL.LowPass2D(self.Pl, self.Tsam)
         self.Vlrow = self.mathfunc.deriv(self.Pl, self.Plpre, self.dt)
-        self.Vl_filterd = self.LowpassVl.LowPass2D(self.Vlrow, self.dt)
+        # self.Vlrow = self.mathfunc.Remove_outlier(self.mathfunc.deriv(self.Pl, self.Plpre, self.dt), self.Vrow_pre, 0.5)
+        self.Vl_filterd = self.LowpassVl.LowPass2D(self.Vlrow, self.Tsam)
 
         # vector and vector velocity
-        self.q = (self.Pl - self.P)/model.L
+        self.q = (self.Pl - (self.P-self.Height_drone))/np.linalg.norm((self.Pl - (self.P-self.Height_drone)))
         self.dqrow = self.mathfunc.deriv(self.q, self.qpre, self.dt)
-        self.dq_filtered = self.LowpassVl.LowPass2D(self.dqrow, self.dt)
+        # self.dqrow = self.mathfunc.Remove_outlier(self.mathfunc.deriv(self.q, self.qpre, self.dt), self.dqrow_pre, 0.5)
+        self.dq_filtered = self.Lowpassdq.LowPass2D(self.dqrow, self.Tsam)
 
         # previous state update
-        self.Plpre = self.Pl
-        self.qpre = self.q
+        self.Plpre[0] = self.Pl[0]; self.Plpre[1] = self.Pl[1]; self.Plpre[2] = self.Pl[2]
+        self.qpre[0] = self.q[0];self.qpre[1] = self.q[1];self.qpre[2] = self.q[2]
+        # self.dqrowpre[0] = self.dqrow[0]; self.dqrowpre[1] = self.dqrow[1]; self.dqrowpre[2] = self.dqrow[2]
+        self.Vrow_pre = self.Vrow
 
         return flag
 
@@ -198,8 +209,8 @@ class Env_Experiment(Frames_setup):
                 controller.set_reference(P, V, R, Euler, Wb, Euler_rate, controller_type)
         elif controller_type == "mellinger":
             controller.set_reference(traj, self.t, tmp_P)
-        elif controller_type == "payload":
-            controller.set_reference(traj)
+        elif controller_type == "QCSL":
+            controller.set_reference(traj, self.t, tmp_P)
 
         
     def take_log(self, ctrl):
@@ -244,31 +255,56 @@ class Env_Experiment(Frames_setup):
         self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
         self.land_P = np.array([0.0, 0.0, model.L+0.5])
 
-    def takeoff(self, controller, Pinit=np.array([0.0, 0.0, 0.0])):
-        self.set_reference(controller=controller, traj="takeoff", controller_type="mellinger", tmp_P=Pinit)
+    def quad_takeoff(self, controller, controller_type="mellinger", Pinit=np.array([0.0, 0.0, 0.0])):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="takeoff", controller_type=controller_type, tmp_P=Pinit)
         self.land_P = np.array([0.0, 0.0, 0.1])
 
-    def land_track(self, controller):
-        self.set_reference(controller=controller, traj="land", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
-
-    def takeoff_50cm(self, controller, Pinit=np.array([0.0, 0.0, 0.0])):
+    def quad_takeoff_50cm(self, controller, Pinit=np.array([0.0, 0.0, 0.0])):
         self.set_reference(controller=controller, traj="takeoff_50cm", controller_type="mellinger", tmp_P=Pinit)
         self.land_P = np.array([0.0, 0.0, 0.1])
 
-    def land_track_50cm(self, controller):
-        self.set_reference(controller=controller, traj="land_50cm", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
-    def rand_with_cmd(self, controller, P=np.array([0.0, 0.0, 0.5+model.L]), controller_type="pid"):
-        self.set_reference(controller=controller, command="hovering", P=P, controller_type=controller_type)
-    
-    def track_circle(self, controller, flag=False):
-        self.set_reference(controller=controller, traj="circle", controller_type="payload", init_controller=flag)
-    
-    def track_straight(self, controller, flag):
-        self.set_reference(controller=controller, traj="straight", controller_type="payload", init_controller=flag)
+    def quad_land(self, controller, controller_type="mellinger"):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="land", controller_type=controller_type, init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
 
-    def stop_track(self, controller):
-        self.set_reference(controller=controller, traj="stop", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], self.P[2]]))
+    def quad_land_50cm(self, controller):
+        self.set_reference(controller=controller, traj="land_50cm", controller_type="mellinger", init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
+
+    def quad_tack_circle(self, controller, controller_type="mellinger", flag=False):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="circle", controller_type=controller_type, init_controller=flag)
+
+    def quad_tack_straight(self, controller, flag=False):
+        self.set_reference(controller=controller, traj="straight", controller_type="mellinger", init_controller=flag)
+
+    def quad_stop_track(self, controller, controller_type="mellinger"):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="stop", controller_type=controller_type, init_controller=False, tmp_P=np.array([self.P[0], self.P[1], self.P[2]]))
         self.land_P[0:2] = self.P[0:2]
+
+    def payload_track_circle(self, controller, controller_type="QCSL", flag=False):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="circle", controller_type=controller_type, init_controller=flag)
+
+    def payload_track_straight(self, controller, controller_type="QCSL", flag=False):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="straight", controller_type=controller_type, init_controller=flag)
+
+    def payload_stop_track(self, controller, controller_type="QCSL"):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="stop", controller_type=controller_type, init_controller=False, tmp_P=np.array([self.Pl[0], self.Pl[1], self.Pl[2]]))
+        self.land_P[0:2] = self.P[0:2]
+
+    def paylaod_track_hover_payload(self, controller, controller_type="QCSL", flag=False):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="hover", controller_type=controller_type, init_controller=flag)
+
+    def payload_takeoff(self, controller, controller_type="QCSL", Pinit=np.array([0.0, 0.0, 0.0])):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="takeoff", controller_type=controller_type, tmp_P=Pinit)
+        self.land_P = np.array([0.0, 0.0, 0.1])
     
-    def track_hover_payload(self, controller, flag=False):
-        self.set_reference(controller=controller, traj="hover", controller_type="payload", init_controller=flag)
+    def payload_land(self, controller, controller_type="QCSL"):
+        controller.switch_controller(controller_type)
+        self.set_reference(controller=controller, traj="land", controller_type=controller_type, init_controller=False, tmp_P=np.array([self.P[0], self.P[1], 0.0]))
