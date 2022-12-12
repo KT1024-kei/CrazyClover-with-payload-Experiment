@@ -28,17 +28,17 @@ def Experiment(Texp, Tsam, num_drone):
         Drone_ctrl[i] = Controllers(Tsam, "mellinger")
 
     for i in range(num_drone):          # ホバリング
-        Drone_env[i].takeoff(Drone_ctrl[i])
+        Drone_env[i].quad_takeoff(Drone_ctrl[i])
         timeHelper.sleep(2)             # 5秒静止
 
     track_flag = True
     stop_flag = True
     land_flag = True
 
-    takeoff_time = 10
+    takeoff_time = 15
     Texp = Texp + takeoff_time
     stop_time = Texp + 5
-    land_time = stop_time + 15
+    land_time = stop_time + 10
     
     Ts = timeHelper.time()
     Te = -Tsam
@@ -50,11 +50,23 @@ def Experiment(Texp, Tsam, num_drone):
             Env.set_clock(t)
             Drone_env[i].set_clock(t)
             Drone_env[i].take_log(Drone_ctrl[i])    #　状態と入力を記録
-            
+
+        if takeoff_time < t < Texp:                      # 着陸
+            for i in range(num_drone):
+                if track_flag:
+                    Drone_env[i].payload_stop_track(Drone_ctrl[i])
+                    track_flag = False
+
+        if Texp < t < stop_time:                      # 着陸
+            for i in range(num_drone):
+                if stop_flag:
+                    Drone_env[i].quad_stop_track(Drone_ctrl[i])
+                    stop_flag = False
+
         if t > stop_time:                      # 着陸
             for i in range(num_drone):
                 if land_flag:
-                    Drone_env[i].land_track(Drone_ctrl[i])
+                    Drone_env[i].quad_land(Drone_ctrl[i])
                     land_flag = False
 
         for i in range(num_drone):      # コントローラに状態を渡して入力加速度と角速度を計算
@@ -87,7 +99,7 @@ def Experiment(Texp, Tsam, num_drone):
         cf[i].cmdFullState(zero, zero, zero, 0.0, zero)
 
 if __name__ == "__main__":
-    Experiment(0, 0.005, 1)
+    Experiment(15, 0.005, 1)
 
 
 # モータマップ4つめ修正
