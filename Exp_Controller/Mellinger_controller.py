@@ -27,13 +27,14 @@ class Mellinger(Mathfunction):
     self.kp = np.array([4.3, 4.3, 4.0])
     self.kv = np.array([3.8, 3.8, 2.5])
     self.ka = np.array([0.0, 0.0, 0.0])
+    self.ki = np.array([0.0, 0.0, 0.0])
     self.kR = np.array([10.0, 10.0, 0.5])
 
     # * initialize nominal state values
     self.Euler_nom = np.array([0.0, 0.0, 0.0])
     self.Euler_rate_nom = np.array([0.0, 0.0, 0.0])
     self.traj_W = np.zeros(3)
-
+    self.Pi = np.array([0.0, 0.0, 0.0])
     # * intialize input values
     self.input_acc = 0.0
     self.input_Wb = np.zeros(3)
@@ -49,12 +50,15 @@ class Mellinger(Mathfunction):
     self.trajectory.set_traj_plan(traj_plan)
 
     self.tmp_pos = np.zeros(3)
+    self.Pi = np.zeros(3)
+    self.ki = np.array([0.0, 0.0, 0.0])
     # * set takeoff position for polynominal land trajectory 
     if traj_plan == "takeoff" or traj_plan == "takeoff_50cm":
       self.tmp_pos = tmp_P
     # * set landing position for polynominal land trajectory 
     elif traj_plan == "land" or traj_plan == "land_50cm":
       self.tmp_pos = tmp_P
+      self.ki[2] = 0.5
     # * set stop position when stop tracking trajectory
     elif traj_plan == "stop":
       self.tmp_pos = tmp_P
@@ -69,12 +73,14 @@ class Mellinger(Mathfunction):
   def Position_controller(self):
 
     # * set desired state of trajectory
+
     traj_pos = self.trajectory.traj_pos + self.tmp_pos
     traj_vel = self.trajectory.traj_vel
     traj_acc = self.trajectory.traj_acc
     
     # * calculate nominal acceleration in 3 dimentions
-    self.ref_acc = self.kp * (traj_pos - self.P) + self.kv*(traj_vel - self.V) + traj_acc
+    self.Pi += (traj_pos - self.P)*self.dt
+    self.ref_acc = self.kp * (traj_pos - self.P) + self.kv*(traj_vel - self.V) + self.ki*self.Pi +  traj_acc
 
     # * calculate input acceleration
     self.input_acc = np.dot(self.ref_acc, np.matmul(self.R, np.array([0.0, 0.0, 1.0])))
